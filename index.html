@@ -1,0 +1,1008 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU 100k Enemies Demo</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a2e; display: flex; justify-content: center; align-items: center; min-height: 100vh; font-family: sans-serif; color: white; }
+        canvas { display: block; border: 1px solid #4CAF50; background-color: #0d0d1a;}
+        #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px; font-size: 0.9em; z-index: 50; }
+        #instructions { position: absolute; bottom: 10px; right: 10px; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px; font-size: 0.8em; text-align: right; z-index: 50;}
+        #infoButton { position: absolute; top: 10px; right: 10px; z-index: 51; padding: 8px 12px; background-color: rgba(40,45,55,0.8); color: #e8e8e8; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; cursor: pointer; font-size: 14px; backdrop-filter: blur(4px); }
+        #infoButton:hover { background-color: rgba(50,55,65,0.9); }
+        #infoPanel { position: absolute; top: 50px; right: 10px; width: calc(100% - 40px); max-width: 450px; max-height: calc(100vh - 70px); background-color: rgba(30,30,35,0.92); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 15px 20px; box-sizing: border-box; z-index: 50; overflow-y: auto; display: none; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        #infoPanel.visible { display: block; } 
+        #infoPanel h2 { color: #569cd6; margin-top: 0; border-bottom: 1px solid #444; padding-bottom: 0.3em; }
+        #infoPanel p, #infoPanel li { color: #c8c8c8; margin-bottom: 0.8em; }
+        #infoPanel ul { padding-left: 20px; margin-top: 0.5em; }
+        #infoPanel strong { color: #9cdcfe; }
+        #infoPanel a { color: #4ec9b0; text-decoration: none; }
+        #infoPanel a:hover { text-decoration: underline; }
+        .info-date { font-size: 0.9em; color: #888; text-align: right; margin-bottom: 1em; }
+        #resetButton { position: absolute; top: 90px; left: 10px; z-index: 51; padding: 8px 12px; background-color: rgba(60,60,60,0.8); color: #e8e8e8; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; cursor: pointer; font-size: 14px; backdrop-filter: blur(4px); }
+        #resetButton:hover { background-color: rgba(80,80,80,0.9); }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <p>Enemies: <span id="numEnemies"></span></p>
+        <p>Kills: <span id="killCount">0</span></p>
+        <p>FPS: <span id="fps"></span></p>
+    </div>
+    <canvas id="webgpu-canvas" width="1280" height="720"></canvas>
+    <div id="instructions">
+        Left-click to attract. Right-click for shockwave. Scroll to zoom.
+    </div>
+
+    <button id="infoButton">Hide Info</button> 
+    <div id="infoPanel" class="visible"> 
+        <h2>WebGPU 100k Enemies Demo</h2>
+        <p class="info-date" id="infoPanelDate"></p>
+        <p>This demo showcases a real-time simulation of 100,000 enemies entirely on the GPU using **WebGPU compute shaders**.</p>
+        <p><strong>Features:</strong></p>
+        <ul>
+            <li>**GPU-Accelerated Simulation:** All enemy movement, collision avoidance, and seeking behaviors are computed in parallel on the GPU.</li>
+            <li>**Attraction:** Left-click on the canvas to set an attraction point.</li>
+            <li>**Shockwave Attack:** Right-click for an expanding shockwave that "kills" enemies. Killed enemies respawn from the edges.</li>
+            <li>**Camera Zoom:** Use the mouse scroll wheel to zoom in and out.</li>
+            <li>**Obstacle Avoidance:** Enemies steer around static obstacles (gray circles).</li>
+            <li>**Varied Enemy Types:** Enemies have different colors, sizes, and speeds.</li>
+            <li>**Kill Counter:** Tracks enemies eliminated by attacks.</li>
+            <li>**Procedural Background & Sprites:** Dynamic gradient background that flashes on attack, and a procedurally generated "duder" sprite for enemies.</li>
+            <li>**Reset Simulation:** Button to reset the simulation.</li>
+        </ul>
+        <p><strong>Inspiration:</strong> This demo was inspired by the impressive <a href="https://www.reddit.com/r/godot/comments/1ldkg5o/now_thats_a_horde_100000_enemies_in_godot/" target="_blank" rel="noopener noreferrer">100,000 enemies in Godot</a> showcase, demonstrating the power of modern graphics APIs for large-scale simulations.</p>
+        <p>Developed by **Trent "Tront" Sterling**.</p>
+        <p>Learn more at <a href="https://tront.xyz" target="_blank" rel="noopener noreferrer">tront.xyz</a>.</p>
+    </div>
+    <button id="resetButton">Reset Simulation</button>
+
+    <script type="module">
+        let adapter, device, context, presentationFormat;
+        let computePipeline, renderPipeline, attractionMarkerRenderPipeline, attackVisualRenderPipeline, backgroundRenderPipeline, obstacleRenderPipeline;
+        let enemyDataBuffer1, enemyDataBuffer2;
+        let initialEnemyDataArray; 
+        let playerUniformBuffer;
+        let attackUniformBuffer;
+        let cameraUniformBuffer;
+        let attractionMarkerUniformBuffer;
+        let obstacleBuffer;
+        let obstacleRenderUniformBuffer;
+        let backgroundUniformBuffer;
+        let killCountBuffer;
+        let duderTexture, duderSampler;
+
+        let bindGroupCompute1, bindGroupCompute2;
+        let renderBindGroup;
+        let attractionMarkerBindGroup;
+        let attackVisualBindGroup;
+        let backgroundBindGroup;
+        let obstacleRenderBindGroup;
+
+        let quadVertexBuffer;
+
+        const NUM_ENEMIES = 100000;
+        const NUM_OBSTACLES = 30;
+        const OBSTACLE_SIZE_MIN = 0.05;
+        const OBSTACLE_SIZE_MAX = 0.15;
+        const ENEMY_VISUAL_SIZE_BASE = 0.008;
+        const ENEMY_BASE_SPEED = 0.02; 
+        const SEPARATION_RADIUS = 0.02;
+        const SEPARATION_FORCE_MULTIPLIER = 0.005;
+        const SEEK_FORCE_MULTIPLIER = 0.005; 
+        const OBSTACLE_AVOIDANCE_RADIUS_MULT = 1.5;
+        const OBSTACLE_AVOIDANCE_FORCE_MULT = 0.0008;
+
+        const ATTACK_RADIUS_MAX = 0.5;
+        const ATTACK_DURATION_MS = 500;
+        const MARKER_SIZE = 0.01;
+
+        let cameraZoomLevel = 1.0;
+        const MIN_ZOOM = 0.2;
+        const MAX_ZOOM = 5.0;
+
+        const ENEMY_TYPES = [
+            { speed_mult: 0.8, size_mult: 0.8, color: [0.0, 0.7, 0.0, 1.0] }, 
+            { speed_mult: 1.2, size_mult: 1.2, color: [0.9, 0.2, 0.1, 1.0] }, 
+            { speed_mult: 1.0, size_mult: 1.0, color: [0.1, 0.5, 0.9, 1.0] }, 
+        ];
+
+        let playerTarget = { x: 0.0, y: 0.0 };
+        let attackState = {
+            is_attack_active: 0.0, 
+            originX: 0.0,
+            originY: 0.0,
+            currentRadius: 0.0,
+            startTime: 0.0
+        };
+        let attractionMarkerState = {
+            posX: 0.0,
+            posY: 0.0,
+            size: MARKER_SIZE,
+            is_visible: 0.0,
+        };
+        let totalKills = 0;
+
+        let currentInputBufferIndex = 0;
+        let lastFrameTime = performance.now();
+        let fpsSamples = [];
+
+        function generateInitialEnemyData() {
+            const data = new Float32Array(NUM_ENEMIES * 8); 
+            for (let i = 0; i < NUM_ENEMIES; ++i) {
+                const type_idx = Math.floor(Math.random() * ENEMY_TYPES.length);
+                const type = ENEMY_TYPES[type_idx];
+
+                data[i * 8 + 0] = Math.random() * 2 - 1; 
+                data[i * 8 + 1] = Math.random() * 2 - 1; 
+                data[i * 8 + 2] = (Math.random() * 2 - 1) * 0.001 * type.speed_mult;
+                data[i * 8 + 3] = (Math.random() * 2 - 1) * 0.001 * type.speed_mult;
+                data[i * 8 + 4] = type_idx; 
+                data[i * 8 + 5] = type.size_mult;
+                data[i * 8 + 6] = type.speed_mult; 
+                data[i * 8 + 7] = 0; 
+            }
+            return data;
+        }
+
+        async function initWebGPU() {
+            adapter = await navigator.gpu?.requestAdapter();
+            if (!adapter) {
+                alert("WebGPU not supported in this browser or no compatible GPU found.");
+                return;
+            }
+            device = await adapter.requestDevice();
+            context = document.getElementById('webgpu-canvas').getContext('webgpu');
+            presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+
+            context.configure({
+                device: device,
+                format: presentationFormat,
+                alphaMode: 'premultiplied',
+            });
+
+            const enemyDataStride = 8 * Float32Array.BYTES_PER_ELEMENT; 
+            const enemyDataSize = NUM_ENEMIES * enemyDataStride; 
+
+            enemyDataBuffer1 = device.createBuffer({
+                size: enemyDataSize,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                label: 'Enemy Data Buffer 1',
+            });
+            enemyDataBuffer2 = device.createBuffer({
+                size: enemyDataSize,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                label: 'Enemy Data Buffer 2',
+            });
+
+            playerUniformBuffer = device.createBuffer({
+                size: 4 * Float32Array.BYTES_PER_ELEMENT, 
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                label: 'Player Uniform Buffer',
+            });
+
+            attackUniformBuffer = device.createBuffer({
+                size: 12 * Float32Array.BYTES_PER_ELEMENT, // vec2, f32, f32, f32 => 5 floats * 4 = 20 bytes. Padded to 48 bytes (12 floats) for compute shader
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                label: 'Attack Uniform Buffer',
+            });
+            
+            backgroundUniformBuffer = device.createBuffer({
+                size: 4 * Float32Array.BYTES_PER_ELEMENT, // is_attack_active, current_radius, padding, padding
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                label: 'Background Uniform Buffer',
+            });
+
+
+            cameraUniformBuffer = device.createBuffer({
+                size: 4 * Float32Array.BYTES_PER_ELEMENT, 
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                label: 'Camera Uniform Buffer',
+            });
+
+            attractionMarkerUniformBuffer = device.createBuffer({
+                size: 8 * Float32Array.BYTES_PER_ELEMENT, 
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                label: 'Attraction Marker Uniform Buffer',
+            });
+
+            obstacleRenderUniformBuffer = device.createBuffer({
+                size: 4 * Float32Array.BYTES_PER_ELEMENT, 
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                label: 'Obstacle Render Uniform Buffer',
+            });
+
+            killCountBuffer = device.createBuffer({
+                size: Uint32Array.BYTES_PER_ELEMENT,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST, 
+                label: 'Kill Count Buffer',
+            });
+            device.queue.writeBuffer(killCountBuffer, 0, new Uint32Array([0]));
+
+            const obstacles = [];
+            for(let i = 0; i < NUM_OBSTACLES; ++i) {
+                obstacles.push(Math.random() * 2 - 1); 
+                obstacles.push(Math.random() * 2 - 1); 
+                obstacles.push(OBSTACLE_SIZE_MIN + Math.random() * (OBSTACLE_SIZE_MAX - OBSTACLE_SIZE_MIN)); 
+                obstacles.push(0); 
+            }
+            obstacleBuffer = device.createBuffer({
+                size: obstacles.length * Float32Array.BYTES_PER_ELEMENT,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                label: 'Obstacle Buffer',
+            });
+            device.queue.writeBuffer(obstacleBuffer, 0, new Float32Array(obstacles));
+
+            initialEnemyDataArray = generateInitialEnemyData();
+            device.queue.writeBuffer(enemyDataBuffer1, 0, initialEnemyDataArray);
+            device.queue.writeBuffer(enemyDataBuffer2, 0, initialEnemyDataArray);
+
+            const quadVertices = new Float32Array([
+                -1.0, -1.0, 0.0, 1.0, 
+                 1.0, -1.0, 1.0, 1.0, 
+                -1.0,  1.0, 0.0, 0.0, 
+                 1.0,  1.0, 1.0, 0.0  
+            ]);
+            quadVertexBuffer = device.createBuffer({
+                size: quadVertices.byteLength,
+                usage: GPUBufferUsage.VERTEX,
+                mappedAtCreation: true,
+            });
+            new Float32Array(quadVertexBuffer.getMappedRange()).set(quadVertices);
+            quadVertexBuffer.unmap();
+
+            const duderSpriteSize = 8;
+            const duderPixelData = new Uint8Array(duderSpriteSize * duderSpriteSize * 4);
+            const duderShape = [ 
+                0,0,1,1,1,1,0,0,
+                0,1,1,1,1,1,1,0,
+                0,1,0,1,1,0,1,0,
+                0,1,1,1,1,1,1,0,
+                0,0,1,1,1,1,0,0,
+                0,1,0,1,1,0,1,0,
+                1,0,0,1,1,0,0,1,
+                0,0,0,1,1,0,0,0
+            ];
+            for (let y = 0; y < duderSpriteSize; y++) {
+                for (let x = 0; x < duderSpriteSize; x++) {
+                    const i = (y * duderSpriteSize + x);
+                    const pixelIsSet = duderShape[i];
+                    const baseIdx = i * 4;
+                    duderPixelData[baseIdx + 0] = pixelIsSet ? 255 : 0; 
+                    duderPixelData[baseIdx + 1] = pixelIsSet ? 255 : 0; 
+                    duderPixelData[baseIdx + 2] = pixelIsSet ? 255 : 0; 
+                    duderPixelData[baseIdx + 3] = pixelIsSet ? 255 : 0; 
+                }
+            }
+            duderTexture = device.createTexture({
+                size: [duderSpriteSize, duderSpriteSize, 1],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+            });
+            device.queue.writeTexture(
+                { texture: duderTexture },
+                duderPixelData,
+                { bytesPerRow: duderSpriteSize * 4, rowsPerImage: duderSpriteSize },
+                [duderSpriteSize, duderSpriteSize, 1]
+            );
+            duderSampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+
+
+            const computeShaderCode = `
+                struct Enemy {
+                    position: vec2<f32>,
+                    velocity: vec2<f32>,
+                    type_id: f32, 
+                    size_mult: f32,
+                    speed_mult: f32, 
+                    _pad0: f32, 
+                };
+
+                struct PlayerUniforms {
+                    player_pos: vec2<f32>,
+                    _pad_player: vec2<f32>, 
+                };
+
+                struct AttackUniforms { // Total should be multiple of 16 bytes
+                    origin: vec2<f32>,    // 8 bytes
+                    radius: f32,          // 4 bytes
+                    is_attack_active: f32, // 4 bytes
+                    aspect_ratio: f32,    // 4 bytes
+                    _pad_attack1: f32,    // 4 bytes
+                    _pad_attack2: f32,    // 4 bytes
+                    _pad_attack3: f32,    // 4 bytes Total = 32. Needs to be 48 for compute pipeline
+                };
+
+
+                struct CameraUniforms {
+                    zoom_level: f32,
+                    aspect_ratio: f32, 
+                    _pad_cam1: f32,
+                    _pad_cam2: f32,
+                };
+
+                struct Obstacle {
+                    position: vec2<f32>,
+                    radius: f32,
+                    _pad: f32,
+                };
+
+                @group(0) @binding(0) var<storage, read> enemies_input: array<Enemy>;
+                @group(0) @binding(1) var<storage, read_write> enemies_output: array<Enemy>;
+                @group(0) @binding(2) var<uniform> player: PlayerUniforms;
+                @group(0) @binding(3) var<uniform> attack: AttackUniforms;
+                @group(0) @binding(4) var<storage, read> obstacles: array<Obstacle>;
+                @group(0) @binding(5) var<storage, read_write> killed_count: atomic<u32>;
+                @group(0) @binding(6) var<uniform> camera: CameraUniforms; 
+
+                fn random_float_from_seed(seed: u32) -> f32 {
+                    let p_f = f32(seed);
+                    let n = fract(p_f * 0.31213);
+                    return fract(n * n * 1.5 * 103.0);
+                }
+
+                @compute @workgroup_size(256)
+                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                    let idx = global_id.x;
+                    if (idx >= arrayLength(&enemies_input)) {
+                        return;
+                    }
+
+                    var current_enemy = enemies_input[idx];
+                    var new_position = current_enemy.position;
+                    var new_velocity = current_enemy.velocity;
+
+                    if (current_enemy.position.x > 999.0) { 
+                        let rand_seed_pos_x = global_id.x * 123u + 1u + u32(attack.radius * 1000.0); 
+                        let rand_seed_pos_y = global_id.x * 456u + 2u + u32(attack.radius * 1000.0);
+                        let rand_seed_vel_x = global_id.x * 789u + 3u + u32(attack.radius * 1000.0);
+                        let rand_seed_vel_y = global_id.x * 987u + 4u + u32(attack.radius * 1000.0);
+                        let rand_seed_type = global_id.x * 654u + 5u + u32(attack.radius * 1000.0);
+
+                        var new_pos_respawn: vec2<f32>;
+                        var new_vel_respawn: vec2<f32>;
+
+                        let edge_choice = u32(random_float_from_seed(rand_seed_pos_x) * 4.0); 
+                        let random_offset_in_edge = random_float_from_seed(rand_seed_pos_y) * 2.0 - 1.0;
+                        let random_vel_component = random_float_from_seed(rand_seed_vel_x) * 0.005 + 0.001; 
+                        let random_vel_sideways = random_float_from_seed(rand_seed_vel_y) * 0.002 - 0.001; 
+
+                        if (edge_choice == 0u) { 
+                            new_pos_respawn = vec2<f32>(random_offset_in_edge * camera.zoom_level, 1.1 * camera.zoom_level);
+                            new_vel_respawn = vec2<f32>(random_vel_sideways, -random_vel_component);
+                        } else if (edge_choice == 1u) { 
+                            new_pos_respawn = vec2<f32>(random_offset_in_edge * camera.zoom_level, -1.1 * camera.zoom_level);
+                            new_vel_respawn = vec2<f32>(random_vel_sideways, random_vel_component);
+                        } else if (edge_choice == 2u) { 
+                            new_pos_respawn = vec2<f32>(-1.1 * camera.zoom_level, random_offset_in_edge * camera.zoom_level);
+                            new_vel_respawn = vec2<f32>(random_vel_component, random_vel_sideways);
+                        } else { 
+                            new_pos_respawn = vec2<f32>(1.1 * camera.zoom_level, random_offset_in_edge * camera.zoom_level);
+                            new_vel_respawn = vec2<f32>(-random_vel_component, random_vel_sideways);
+                        }
+
+                        let new_type_id_raw = random_float_from_seed(rand_seed_type) * f32(3u); 
+                        let new_type_id_u32 = u32(new_type_id_raw);
+                        
+                        var new_speed_mult_val: f32;
+                        var new_size_mult_val: f32;
+                        if (new_type_id_u32 == 0u) { new_speed_mult_val = 0.8; new_size_mult_val = 0.8;} 
+                        else if (new_type_id_u32 == 1u) { new_speed_mult_val = 1.2; new_size_mult_val = 1.2; } 
+                        else { new_speed_mult_val = 1.0; new_size_mult_val = 1.0; }
+
+                        enemies_output[idx] = Enemy(new_pos_respawn, new_vel_respawn, f32(new_type_id_u32), new_size_mult_val, new_speed_mult_val, 0.0);
+                        return; 
+                    }
+
+                    if (attack.is_attack_active == 1.0) { 
+                        let dist_to_attack = distance(current_enemy.position, attack.origin);
+                        if (dist_to_attack < attack.radius) {
+                            enemies_output[idx] = Enemy(vec2<f32>(1000.0, 1000.0), vec2<f32>(0.0, 0.0), current_enemy.type_id, current_enemy.size_mult, current_enemy.speed_mult, 0.0); 
+                            atomicAdd(&killed_count, 1u);
+                            return;
+                        }
+                    }
+                    
+                    let to_player = player.player_pos - current_enemy.position;
+                    let dist_to_player = length(to_player);
+                    if (dist_to_player > 0.01 * camera.zoom_level) { 
+                        let desired_velocity = normalize(to_player) * ${ENEMY_BASE_SPEED} * current_enemy.speed_mult; 
+                        let steering_force = (desired_velocity - new_velocity) * ${SEEK_FORCE_MULTIPLIER};
+                        new_velocity += steering_force;
+                    }
+
+                    var separation_vec = vec2<f32>(0.0, 0.0);
+                    let num_neighbors_to_check = 5;
+                    let total_enemies = arrayLength(&enemies_input);
+
+                    for (var i = 0; i < num_neighbors_to_check; i++) {
+                        let other_idx = u32(abs(f32(i * 12347) + f32(idx * 7919)) % f32(total_enemies));
+                        if (other_idx == idx) { continue; }
+
+                        let other_enemy = enemies_input[other_idx];
+                        let to_other = current_enemy.position - other_enemy.position;
+                        let dist = length(to_other);
+
+                        if (dist > 0.0 && dist < (${SEPARATION_RADIUS} * camera.zoom_level) ) { 
+                            separation_vec += normalize(to_other) * (1.0 - dist / (${SEPARATION_RADIUS} * camera.zoom_level));
+                        }
+                    }
+                    new_velocity += separation_vec * ${SEPARATION_FORCE_MULTIPLIER};
+
+                    var obstacle_avoidance_vec = vec2<f32>(0.0, 0.0);
+                    for (var i = 0u; i < arrayLength(&obstacles); i++) {
+                        let obstacle = obstacles[i];
+                        let to_obstacle = current_enemy.position - obstacle.position;
+                        let dist_to_obstacle = length(to_obstacle);
+                        let avoidance_radius = obstacle.radius * ${OBSTACLE_AVOIDANCE_RADIUS_MULT};
+                        if (dist_to_obstacle < avoidance_radius) {
+                            let repulsion_force = normalize(to_obstacle) * (1.0 - dist_to_obstacle / avoidance_radius);
+                            obstacle_avoidance_vec += repulsion_force;
+                        }
+                    }
+                    new_velocity += obstacle_avoidance_vec * ${OBSTACLE_AVOIDANCE_FORCE_MULT};
+
+                    new_position += new_velocity;
+
+                    let bounce_damping = 0.8;
+                    if (new_position.x < -1.0 * camera.zoom_level || new_position.x > 1.0 * camera.zoom_level) {
+                        new_position.x = clamp(new_position.x, -1.0 * camera.zoom_level, 1.0 * camera.zoom_level);
+                        new_velocity.x *= -bounce_damping;
+                    }
+                    if (new_position.y < -1.0 * camera.zoom_level || new_position.y > 1.0 * camera.zoom_level) {
+                        new_position.y = clamp(new_position.y, -1.0 * camera.zoom_level, 1.0 * camera.zoom_level);
+                        new_velocity.y *= -bounce_damping;
+                    }
+
+                    enemies_output[idx] = Enemy(new_position, new_velocity, current_enemy.type_id, current_enemy.size_mult, current_enemy.speed_mult, 0.0);
+                }
+            `;
+
+            const renderShaderCode = `
+                struct Enemy {
+                    position: vec2<f32>,
+                    velocity: vec2<f32>,
+                    type_id: f32, 
+                    size_mult: f32,
+                    speed_mult: f32, 
+                    _pad0: f32, 
+                };
+
+                struct CameraUniforms {
+                    zoom_level: f32,
+                    aspect_ratio: f32,
+                    _pad_cam1: f32,
+                    _pad_cam2: f32,
+                };
+
+                @group(0) @binding(0) var<storage, read> enemies: array<Enemy>;
+                @group(0) @binding(1) var<uniform> camera: CameraUniforms;
+                @group(0) @binding(2) var duder_sampler: sampler;
+                @group(0) @binding(3) var duder_texture: texture_2d<f32>;
+
+                struct VertexInput {
+                    @location(0) quad_pos: vec2<f32>,
+                    @location(1) uv_coords: vec2<f32>,
+                };
+
+                struct VertexOutput {
+                    @builtin(position) clip_position: vec4<f32>,
+                    @location(0) @interpolate(flat) enemy_color_tint: vec4<f32>,
+                    @location(1) uv: vec2<f32>,
+                };
+
+                @vertex
+                fn vs_main(input: VertexInput, @builtin(instance_index) instance_idx: u32) -> VertexOutput {
+                    var output: VertexOutput;
+                    let enemy = enemies[instance_idx];
+
+                    let type_colors = array<vec4<f32>, 3>(
+                        vec4<f32>(0.0, 0.7, 0.0, 1.0), 
+                        vec4<f32>(0.9, 0.2, 0.1, 1.0), 
+                        vec4<f32>(0.1, 0.5, 0.9, 1.0)  
+                    );
+                    
+                    let type_idx = u32(enemy.type_id);
+                    let actual_size = ${ENEMY_VISUAL_SIZE_BASE} * enemy.size_mult;
+
+                    let scaled_quad_pos = input.quad_pos * actual_size;
+                    let final_pos_x = scaled_quad_pos.x;
+                    let final_pos_y = scaled_quad_pos.y / camera.aspect_ratio; 
+
+                    output.clip_position = vec4<f32>( (vec2<f32>(final_pos_x, final_pos_y) + enemy.position) / camera.zoom_level, 0.0, 1.0);
+                    output.enemy_color_tint = type_colors[type_idx];
+                    output.uv = input.uv_coords;
+                    return output;
+                }
+
+                @fragment
+                fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+                    let sprite_color = textureSample(duder_texture, duder_sampler, in.uv);
+                    if (sprite_color.a < 0.1) { 
+                        discard;
+                    }
+                    return sprite_color * in.enemy_color_tint;
+                }
+            `;
+            
+            const backgroundShaderCode = `
+                struct CameraUniforms { zoom_level: f32, aspect_ratio: f32, _pad1: f32, _pad2: f32 };
+                struct AttackUniforms { origin: vec2<f32>, radius: f32, is_attack_active: f32, _pad_attack:f32 };
+                @group(0) @binding(0) var<uniform> camera: CameraUniforms;
+                @group(0) @binding(1) var<uniform> attack: AttackUniforms;
+
+                struct VertexOutput { @builtin(position) clip_position: vec4<f32>, @location(0) uv: vec2<f32>,};
+                @vertex fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput { var o:VertexOutput; let p=array<vec2<f32>,6>(vec2(-1,-1),vec2(1,-1),vec2(-1,1),vec2(-1,1),vec2(1,-1),vec2(1,1)); o.clip_position=vec4(p[vi],0,1); o.uv=(p[vi]*.5)+.5; return o;}
+                @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                    let base_color_a = vec3<f32>(0.1, 0.1, 0.2); 
+                    let base_color_b = vec3<f32>(0.05, 0.05, 0.1); 
+                    var final_color = mix(base_color_a, base_color_b, uv.y);
+                    if (attack.is_attack_active == 1.0) {
+                        let flash_intensity = 1.0 - (attack.radius / ${ATTACK_RADIUS_MAX});
+                        final_color = mix(final_color, vec3<f32>(0.5, 0.0, 0.0), flash_intensity * 0.7); // Mix with red
+                    }
+                    return vec4<f32>(final_color, 1.0);
+                }
+            `;
+            const obstacleRenderShaderCode = `
+                struct Obstacle { position: vec2<f32>, radius: f32, _pad: f32, };
+                struct CameraUniforms { zoom_level: f32, aspect_ratio: f32, _pad1: f32, _pad2: f32 };
+                @group(0) @binding(0) var<storage, read> obstacles: array<Obstacle>;
+                @group(0) @binding(1) var<uniform> camera: CameraUniforms;
+                struct VI { @location(0) qp: vec2<f32>, @location(1) uv:vec2<f32>}; struct VO { @builtin(position) cp: vec4<f32>, @location(0) lp: vec2<f32>};
+                @vertex fn vs_main(i:VI, @builtin(instance_index) ii:u32)->VO{var o:VO;let ob=obstacles[ii];let sp=i.qp*ob.radius;o.cp=vec4((vec2(sp.x,sp.y/camera.aspect_ratio)+ob.position)/camera.zoom_level,0,1);o.lp=i.qp;return o;}
+                @fragment fn fs_main(@location(0) lp:vec2<f32>)->@location(0)vec4<f32>{if(length(lp)>1.0){discard;}return vec4(.5,.5,.5,1);}
+            `;
+            const attractionMarkerShaderCode = `
+                struct MarkerUniforms { pos: vec2<f32>, size: f32, is_visible: f32 };
+                struct CameraUniforms { zoom_level: f32, aspect_ratio: f32, _pad1: f32, _pad2: f32 };
+                @group(0) @binding(0) var<uniform> marker: MarkerUniforms;
+                @group(0) @binding(1) var<uniform> camera: CameraUniforms; 
+                struct VI { @location(0) qp: vec2<f32>, @location(1) uv:vec2<f32> }; struct VO { @builtin(position) cp: vec4<f32>};
+                @vertex fn vs_main(i:VI)->VO{var o:VO;let sp=i.qp*marker.size;o.cp=vec4((vec2(sp.x,sp.y/camera.aspect_ratio)+marker.pos)/camera.zoom_level,0,1);return o;}
+                @fragment fn fs_main()->@location(0)vec4<f32>{if(marker.is_visible==0.0){discard;}return vec4(0,.5,1,1);}
+            `;
+            const attackVisualShaderCode = `
+                struct AttackUniforms { origin: vec2<f32>, radius: f32, is_attack_active: f32, aspect_ratio: f32, _pad_attack1: f32, _pad_attack2: f32, _pad_attack3: f32 };
+                struct CameraUniforms { zoom_level: f32, aspect_ratio: f32, _pad1: f32, _pad2: f32 };
+                @group(0) @binding(0) var<uniform> attack: AttackUniforms;
+                @group(0) @binding(1) var<uniform> camera: CameraUniforms; 
+                struct VI { @location(0) qp: vec2<f32>, @location(1) uv:vec2<f32> }; struct VO { @builtin(position) cp: vec4<f32>, @location(0) lp: vec2<f32>};
+                @vertex fn vs_main(i:VI)->VO{var o:VO;let sp=i.qp*attack.radius;o.cp=vec4((vec2(sp.x,sp.y/camera.aspect_ratio)+attack.origin)/camera.zoom_level,0,1);o.lp=i.qp;return o;}
+                @fragment fn fs_main(@location(0) lp:vec2<f32>)->@location(0)vec4<f32>{if(attack.is_attack_active==0.0){discard;}let d=length(lp);let a=smoothstep(1,.9,d);return vec4(1,0,0,a*(1.0-attack.radius/${ATTACK_RADIUS_MAX}));}
+            `;
+
+
+            const computeBindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                    { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                    { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                    { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } }, 
+                ],
+            });
+
+            computePipeline = device.createComputePipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [computeBindGroupLayout] }),
+                compute: {
+                    module: device.createShaderModule({ code: computeShaderCode, label: 'Compute Shader' }),
+                    entryPoint: 'main',
+                },
+            });
+
+            const enemyRenderBindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+                    { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform'} }, 
+                    { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+                    { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+                ],
+            });
+
+            renderPipeline = device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [enemyRenderBindGroupLayout] }),
+                vertex: {
+                    module: device.createShaderModule({ code: renderShaderCode, label: 'Render Shader' }),
+                    entryPoint: 'vs_main',
+                    buffers: [
+                        {
+                            arrayStride: 4 * Float32Array.BYTES_PER_ELEMENT, 
+                            attributes: [
+                                { shaderLocation: 0, offset: 0, format: 'float32x2' }, 
+                                { shaderLocation: 1, offset: 2 * Float32Array.BYTES_PER_ELEMENT, format: 'float32x2' }, 
+                            ],
+                        },
+                    ],
+                },
+                fragment: {
+                    module: device.createShaderModule({ code: renderShaderCode, label: 'Render Shader' }),
+                    entryPoint: 'fs_main',
+                    targets: [{ 
+                        format: presentationFormat,
+                        blend: {
+                            color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add'},
+                            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add'}
+                        }
+                    }],
+                },
+                primitive: {
+                    topology: 'triangle-strip',
+                },
+            });
+
+            const backgroundBindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {type: 'uniform'} }, // camera
+                    { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: {type: 'uniform'} }, // attack
+                ]
+            });
+            backgroundRenderPipeline = device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [backgroundBindGroupLayout] }),
+                vertex: {
+                    module: device.createShaderModule({ code: backgroundShaderCode, label: 'Background Shader' }),
+                    entryPoint: 'vs_main',
+                },
+                fragment: {
+                    module: device.createShaderModule({ code: backgroundShaderCode, label: 'Background Shader' }),
+                    entryPoint: 'fs_main',
+                    targets: [{ format: presentationFormat }],
+                },
+                primitive: {
+                    topology: 'triangle-list',
+                },
+            });
+
+            const obstacleRenderBindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }, 
+                ],
+            });
+            obstacleRenderPipeline = device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [obstacleRenderBindGroupLayout] }),
+                vertex: {
+                    module: device.createShaderModule({ code: obstacleRenderShaderCode, label: 'Obstacle Render Shader' }),
+                    entryPoint: 'vs_main',
+                    buffers: [{
+                        arrayStride: 4 * Float32Array.BYTES_PER_ELEMENT,
+                        attributes: [
+                            { shaderLocation: 0, offset: 0, format: 'float32x2' },
+                            { shaderLocation: 1, offset: 2 * Float32Array.BYTES_PER_ELEMENT, format: 'float32x2' },
+                        ],
+                    }],
+                },
+                fragment: {
+                    module: device.createShaderModule({ code: obstacleRenderShaderCode, label: 'Obstacle Render Shader' }),
+                    entryPoint: 'fs_main',
+                    targets: [{ format: presentationFormat }],
+                },
+                primitive: {
+                    topology: 'triangle-strip',
+                },
+            });
+
+
+            const attractionMarkerBindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }, 
+                ],
+            });
+
+            attractionMarkerRenderPipeline = device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [attractionMarkerBindGroupLayout] }),
+                vertex: {
+                    module: device.createShaderModule({ code: attractionMarkerShaderCode, label: 'Attraction Marker Shader' }),
+                    entryPoint: 'vs_main',
+                    buffers: [{
+                        arrayStride: 4 * Float32Array.BYTES_PER_ELEMENT,
+                        attributes: [
+                            { shaderLocation: 0, offset: 0, format: 'float32x2' },
+                            { shaderLocation: 1, offset: 2 * Float32Array.BYTES_PER_ELEMENT, format: 'float32x2' },
+                        ],
+                    }],
+                },
+                fragment: {
+                    module: device.createShaderModule({ code: attractionMarkerShaderCode, label: 'Attraction Marker Shader' }),
+                    entryPoint: 'fs_main',
+                    targets: [{ format: presentationFormat }],
+                },
+                primitive: {
+                    topology: 'triangle-strip',
+                },
+            });
+
+            const attackVisualBindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }, 
+                ],
+            });
+
+            attackVisualRenderPipeline = device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [attackVisualBindGroupLayout] }),
+                vertex: {
+                    module: device.createShaderModule({ code: attackVisualShaderCode, label: 'Attack Visual Shader' }),
+                    entryPoint: 'vs_main',
+                    buffers: [{
+                        arrayStride: 4 * Float32Array.BYTES_PER_ELEMENT,
+                        attributes: [
+                            { shaderLocation: 0, offset: 0, format: 'float32x2' },
+                            { shaderLocation: 1, offset: 2 * Float32Array.BYTES_PER_ELEMENT, format: 'float32x2' },
+                        ],
+                    }],
+                },
+                fragment: {
+                    module: device.createShaderModule({ code: attackVisualShaderCode, label: 'Attack Visual Shader' }),
+                    entryPoint: 'fs_main',
+                    targets: [{ 
+                        format: presentationFormat,
+                        blend: {
+                            color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+                        }
+                    }],
+                },
+                primitive: {
+                    topology: 'triangle-strip',
+                },
+            });
+
+            bindGroupCompute1 = device.createBindGroup({
+                layout: computeBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: enemyDataBuffer1 } },
+                    { binding: 1, resource: { buffer: enemyDataBuffer2 } },
+                    { binding: 2, resource: { buffer: playerUniformBuffer } },
+                    { binding: 3, resource: { buffer: attackUniformBuffer } },
+                    { binding: 4, resource: { buffer: obstacleBuffer } },
+                    { binding: 5, resource: { buffer: killCountBuffer } },
+                    { binding: 6, resource: { buffer: cameraUniformBuffer } },
+                ],
+            });
+
+            bindGroupCompute2 = device.createBindGroup({
+                layout: computeBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: enemyDataBuffer2 } },
+                    { binding: 1, resource: { buffer: enemyDataBuffer1 } },
+                    { binding: 2, resource: { buffer: playerUniformBuffer } },
+                    { binding: 3, resource: { buffer: attackUniformBuffer } },
+                    { binding: 4, resource: { buffer: obstacleBuffer } },
+                    { binding: 5, resource: { buffer: killCountBuffer } },
+                    { binding: 6, resource: { buffer: cameraUniformBuffer } },
+                ],
+            });
+
+            backgroundBindGroup = device.createBindGroup({
+                layout: backgroundRenderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: cameraUniformBuffer } },
+                    { binding: 1, resource: { buffer: attackUniformBuffer } },
+                ],
+            });
+
+            obstacleRenderBindGroup = device.createBindGroup({
+                layout: obstacleRenderBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: obstacleBuffer } },
+                    { binding: 1, resource: { buffer: cameraUniformBuffer } },
+                ],
+            });
+
+            attractionMarkerBindGroup = device.createBindGroup({
+                layout: attractionMarkerBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: attractionMarkerUniformBuffer } },
+                    { binding: 1, resource: { buffer: cameraUniformBuffer } },
+                ],
+            });
+
+            attackVisualBindGroup = device.createBindGroup({
+                layout: attackVisualBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: attackUniformBuffer } },
+                    { binding: 1, resource: { buffer: cameraUniformBuffer } },
+                ],
+            });
+            
+            document.getElementById('numEnemies').textContent = NUM_ENEMIES.toLocaleString();
+
+            const canvas = document.getElementById('webgpu-canvas');
+            const aspectRatio = canvas.width / canvas.height;
+
+            canvas.addEventListener('mousedown', (event) => { 
+                const infoPanel = document.getElementById('infoPanel');
+                const infoButton = document.getElementById('infoButton');
+                if (infoPanel.classList.contains('visible')) {
+                    infoPanel.classList.remove('visible');
+                    infoButton.textContent = 'Show Info';
+                }
+                const rect = canvas.getBoundingClientRect();
+                if (event.button === 0) { 
+                    playerTarget.x = ((event.clientX - rect.left) / rect.width * 2 - 1) * cameraZoomLevel;
+                    playerTarget.y = ((1 - (event.clientY - rect.top) / rect.height) * 2 - 1) * cameraZoomLevel;
+                    attractionMarkerState.posX = playerTarget.x;
+                    attractionMarkerState.posY = playerTarget.y;
+                    attractionMarkerState.is_visible = 1.0; 
+                }
+            });
+
+            canvas.addEventListener('contextmenu', (event) => {
+                event.preventDefault(); 
+                const infoPanel = document.getElementById('infoPanel'); 
+                const infoButton = document.getElementById('infoButton');
+                if (infoPanel.classList.contains('visible')) {
+                    infoPanel.classList.remove('visible');
+                    infoButton.textContent = 'Show Info';
+                }
+                const rect = canvas.getBoundingClientRect();
+                attackState.originX = ((event.clientX - rect.left) / rect.width * 2 - 1) * cameraZoomLevel;
+                attackState.originY = ((1 - (event.clientY - rect.top) / rect.height) * 2 - 1) * cameraZoomLevel;
+                attackState.currentRadius = 0.0;
+                attackState.is_attack_active = 1.0; 
+                attackState.startTime = performance.now();
+            });
+
+            canvas.addEventListener('wheel', (event) => {
+                event.preventDefault();
+                const zoomDelta = event.deltaY * -0.001;
+                cameraZoomLevel = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cameraZoomLevel + zoomDelta * cameraZoomLevel * 0.5));
+            });
+
+            document.getElementById('infoButton').addEventListener('click', () => {
+                const infoPanel = document.getElementById('infoPanel');
+                const infoButton = document.getElementById('infoButton');
+                infoPanel.classList.toggle('visible');
+                if (infoPanel.classList.contains('visible')) {
+                    infoButton.textContent = 'Hide Info';
+                } else {
+                    infoButton.textContent = 'Show Info';
+                }
+            });
+            
+            const infoPanel = document.getElementById('infoPanel');
+            const infoButton = document.getElementById('infoButton');
+            infoPanel.classList.add('visible');
+            infoButton.textContent = 'Hide Info';
+
+            document.getElementById('resetButton').addEventListener('click', () => {
+                totalKills = 0;
+                document.getElementById('killCount').textContent = totalKills.toLocaleString();
+                device.queue.writeBuffer(killCountBuffer, 0, new Uint32Array([0]));
+                initialEnemyDataArray = generateInitialEnemyData();
+                device.queue.writeBuffer(enemyDataBuffer1, 0, initialEnemyDataArray);
+                device.queue.writeBuffer(enemyDataBuffer2, 0, initialEnemyDataArray);
+            });
+
+            const dateEl = document.getElementById('infoPanelDate');
+            if (dateEl) { dateEl.textContent = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }); }
+            
+            device.queue.writeBuffer(attackUniformBuffer, 0, new Float32Array([attackState.originX, attackState.originY, attackState.currentRadius, attackState.is_attack_active, aspectRatio, 0,0,0,0,0,0,0])); 
+            device.queue.writeBuffer(attractionMarkerUniformBuffer, 0, new Float32Array([attractionMarkerState.posX, attractionMarkerState.posY, attractionMarkerState.size, aspectRatio, attractionMarkerState.is_visible, 0, 0, 0])); 
+            device.queue.writeBuffer(obstacleRenderUniformBuffer, 0, new Float32Array([aspectRatio, 0, 0, 0])); 
+            requestAnimationFrame(frame);
+        }
+
+        async function frame() {
+            const currentTime = performance.now();
+            const deltaTime = currentTime - lastFrameTime;
+            lastFrameTime = currentTime;
+
+            fpsSamples.push(1000 / deltaTime);
+            if (fpsSamples.length > 60) { fpsSamples.shift(); }
+            const averageFps = fpsSamples.reduce((sum, val) => sum + val, 0) / fpsSamples.length;
+            document.getElementById('fps').textContent = averageFps.toFixed(1);
+
+            device.queue.writeBuffer(playerUniformBuffer, 0, new Float32Array([playerTarget.x, playerTarget.y, 0, 0])); 
+
+            if (attackState.is_attack_active === 1.0) { 
+                const elapsed = currentTime - attackState.startTime;
+                if (elapsed < ATTACK_DURATION_MS) { attackState.currentRadius = (elapsed / ATTACK_DURATION_MS) * ATTACK_RADIUS_MAX; } 
+                else { attackState.currentRadius = ATTACK_RADIUS_MAX; attackState.is_attack_active = 0.0; }
+            }
+            const canvas = document.getElementById('webgpu-canvas');
+            const aspectRatio = canvas.width / canvas.height;
+            device.queue.writeBuffer(cameraUniformBuffer, 0, new Float32Array([cameraZoomLevel, aspectRatio, 0, 0]));
+            device.queue.writeBuffer(attackUniformBuffer, 0, new Float32Array([attackState.originX, attackState.originY, attackState.currentRadius, attackState.is_attack_active, aspectRatio, 0,0,0,0,0,0,0])); 
+            device.queue.writeBuffer(attractionMarkerUniformBuffer, 0, new Float32Array([attractionMarkerState.posX, attractionMarkerState.posY, attractionMarkerState.size, aspectRatio, attractionMarkerState.is_visible, 0, 0, 0])); 
+            device.queue.writeBuffer(obstacleRenderUniformBuffer, 0, new Float32Array([aspectRatio, 0, 0, 0]));
+
+            const commandEncoder = device.createCommandEncoder({ label: 'Main Command Encoder' });
+
+            let currentInputBuffer, currentOutputBuffer, currentComputeBindGroup;
+            if (currentInputBufferIndex === 0) {
+                currentInputBuffer = enemyDataBuffer1; currentOutputBuffer = enemyDataBuffer2; currentComputeBindGroup = bindGroupCompute1;
+            } else {
+                currentInputBuffer = enemyDataBuffer2; currentOutputBuffer = enemyDataBuffer1; currentComputeBindGroup = bindGroupCompute2;
+            }
+
+            const computePassEncoder = commandEncoder.beginComputePass({ label: 'Enemy Compute Pass' });
+            computePassEncoder.setPipeline(computePipeline);
+            computePassEncoder.setBindGroup(0, currentComputeBindGroup);
+            computePassEncoder.dispatchWorkgroups(Math.ceil(NUM_ENEMIES / 256));
+            computePassEncoder.end(); 
+
+            const currentFrameKillCountStagingBuffer = device.createBuffer({
+                size: Uint32Array.BYTES_PER_ELEMENT,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            });
+            
+            commandEncoder.copyBufferToBuffer(killCountBuffer, 0, currentFrameKillCountStagingBuffer, 0, Uint32Array.BYTES_PER_ELEMENT);
+            commandEncoder.clearBuffer(killCountBuffer, 0, Uint32Array.BYTES_PER_ELEMENT);
+
+            renderBindGroup = device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: currentOutputBuffer } },
+                    { binding: 1, resource: { buffer: cameraUniformBuffer } },
+                    { binding: 2, resource: duderSampler },
+                    { binding: 3, resource: duderTexture.createView() },
+                ],
+            });
+
+            const renderPassDescriptor = {
+                label: 'Main Render Pass',
+                colorAttachments: [ { view: context.getCurrentTexture().createView(), clearValue: { r: 0.1, g: 0.1, b: 0.2, a: 1.0 }, loadOp: 'clear', storeOp: 'store' } ],
+            };
+
+            const renderPassEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+            
+            renderPassEncoder.setPipeline(backgroundRenderPipeline);
+            renderPassEncoder.setBindGroup(0, backgroundBindGroup);
+            renderPassEncoder.draw(6); 
+
+            renderPassEncoder.setPipeline(obstacleRenderPipeline);
+            renderPassEncoder.setVertexBuffer(0, quadVertexBuffer);
+            renderPassEncoder.setBindGroup(0, obstacleRenderBindGroup);
+            renderPassEncoder.draw(4, NUM_OBSTACLES);
+
+            renderPassEncoder.setPipeline(renderPipeline);
+            renderPassEncoder.setVertexBuffer(0, quadVertexBuffer);
+            renderPassEncoder.setBindGroup(0, renderBindGroup);
+            renderPassEncoder.draw(4, NUM_ENEMIES);
+
+            renderPassEncoder.setPipeline(attractionMarkerRenderPipeline);
+            renderPassEncoder.setBindGroup(0, attractionMarkerBindGroup);
+            renderPassEncoder.setVertexBuffer(0, quadVertexBuffer);
+            renderPassEncoder.draw(4, 1);
+
+            if (attackState.is_attack_active === 1.0) {
+                renderPassEncoder.setPipeline(attackVisualRenderPipeline);
+                renderPassEncoder.setBindGroup(0, attackVisualBindGroup);
+                renderPassEncoder.setVertexBuffer(0, quadVertexBuffer);
+                renderPassEncoder.draw(4, 1);
+            }
+
+            renderPassEncoder.end(); 
+
+            device.queue.submit([commandEncoder.finish()]); 
+
+            currentFrameKillCountStagingBuffer.mapAsync(GPUMapMode.READ)
+                .then(() => { 
+                    const data = new Uint32Array(currentFrameKillCountStagingBuffer.getMappedRange()); 
+                    totalKills += data[0]; 
+                    document.getElementById('killCount').textContent = totalKills.toLocaleString();
+                    
+                    currentFrameKillCountStagingBuffer.unmap();
+                    currentFrameKillCountStagingBuffer.destroy();
+                })
+                .catch(error => {
+                    console.error("Failed to read kill count buffer:", error);
+                    if (currentFrameKillCountStagingBuffer && currentFrameKillCountStagingBuffer.unmap) currentFrameKillCountStagingBuffer.unmap();
+                    if (currentFrameKillCountStagingBuffer && currentFrameKillCountStagingBuffer.destroy) currentFrameKillCountStagingBuffer.destroy();
+                });
+
+            currentInputBufferIndex = 1 - currentInputBufferIndex;
+            requestAnimationFrame(frame);
+        }
+
+        window.addEventListener('load', initWebGPU);
+    </script>
+</body>
+</html>
